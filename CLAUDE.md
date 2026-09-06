@@ -1,4 +1,4 @@
-﻿# CLAUDE.md
+# CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
@@ -93,3 +93,17 @@ com.argus.rag
 - **Auth properties prefix**: `argus.rag.auth` (maps to `AuthProperties` class)
 - **MyBatis-Plus XML mappers**: `classpath*:/mappers/**/*.xml`
 - **Enum handling**: Stored as VARCHAR using enum `.name()` values
+
+## Agent skills
+
+### 问题跟踪器（Issue tracker）
+
+本仓库的问题以 GitHub Issues 形式存在；技能使用 `gh` CLI。参见 `docs/agents/issue-tracker.md`。
+
+### 分类标签（Triage labels）
+
+技能使用五个默认分类标签。参见 `docs/agents/triage-labels.md`。
+
+### 领域文档（Domain docs）
+
+单上下文：仓库根目录下有一个 `CONTEXT.md` 和 `docs/adr/`。参见 `docs/agents/domain.md`。
