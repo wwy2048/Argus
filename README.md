@@ -187,6 +187,7 @@ graph TB
 - **RRF 双通道融合**：向量 + 关键词结果统一排序，类簇聚合 + 邻居窗口扩展
 - **四级证据评估**：NONE → WEAK → PARTIAL → SUFFICIENT，证据不足时主动拒答
 - **引用溯源**：每条回答附带引用片段、来源文档、相关性评分
+- **SSE 流式断点续传**：事件写入共享 Redis（List+offset），客户端断连后可通过 `/api/qa/stream-ask/resume` 重放，支持多副本“任意节点可续传”
 
 ### 🤖 AI 智能助手
 
@@ -198,6 +199,7 @@ graph TB
   - L2 紧凑摘要（精炼的历史压缩，丢弃冗余细节）
   - L3 运行时截断（Token 超 50000 时的最后防线）
 - **SSE 流式输出**：Delta 去重 + AGENT_MODEL_FINISHED 兜底
+- **SSE 流式断点续传**：事件落 Redis，支持 `chat/stream/resume` 断线重放、`chat/stream/stop` 主动停止
 
 <br/>
 
@@ -407,6 +409,9 @@ npm run dev
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/api/qa/ask` | 提交问题，获取 AI 回答 + 引用溯源 |
+| POST | `/api/qa/stream-ask` | 流式问答（SSE，逐 token 推送，支持断点续传） |
+| GET | `/api/qa/stream-ask/resume` | 断点续传：重放指定流（streamId） |
+| POST | `/api/qa/stream-ask/stop` | 主动停止指定流（streamId） |
 
 <details>
 <summary><b>📋 请求/响应示例</b></summary>
@@ -446,9 +451,13 @@ npm run dev
 | DELETE | `/api/assistant/sessions/{id}` | 删除会话 |
 | POST | `/api/assistant/chat` | 同步聊天（CHAT / KB_SEARCH） |
 | POST | `/api/assistant/chat/stream` | 流式聊天（SSE，逐字推送） |
+| GET | `/api/assistant/chat/stream/resume` | 断点续传：重放指定流（sessionId+streamId） |
+| POST | `/api/assistant/chat/stream/stop` | 主动停止指定流（sessionId+streamId） |
 | GET | `/api/assistant/sessions/{id}/context` | 获取会话上下文（含摘要） |
 
 <br/>
+
+> 📖 **SSE 流断点续传**：设计、Redis 结构与 API 契约见 [docs/SSE流断点续传设计.md](docs/SSE流断点续传设计.md)。
 
 ## 📁 项目结构
 

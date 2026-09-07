@@ -12,6 +12,8 @@ import {
   fetchAssistantSessionDetail,
   fetchAssistantConversationContext,
   renameAssistantSession,
+  resumeAssistantStream,
+  stopAssistantStream,
   streamAssistantMessage,
 } from '@/api/assistant'
 import type {
@@ -56,6 +58,11 @@ const selectedGroupName = computed(() => {
 const streaming = ref(false)
 let streamAbort: AbortController | null = null
 let lastAskPayload: { text: string; mode: AssistantToolMode; groupId: number | null } | null = null
+
+// 断点续传所需的流级状态
+let activeStreamId: string | null = null
+let activeStreamSessionId: number | null = null
+let resumeAttempted = false
 
 // ── Helpers ──
 function localId(): string {
@@ -238,6 +245,11 @@ async function handleAsk(text: string) {
   // 直接保留 push 前的原始对象会"写到原始内存但 Vue 不知道"，打字机效果失效。
   const target = messages.value[messages.value.length - 1]!
 
+  // 重置断点续传状态：每次新提问都从 live 流开始。
+  activeStreamId = null
+  activeStreamSessionId = sessionId
+  resumeAttempted = false
+
   streaming.value = true
   streamAbort = new AbortController()
 
@@ -256,6 +268,15 @@ async function handleAsk(text: string) {
       },
     )
   } catch (err) {
+    console.log('[断连诊断] assistant', {
+      errName: (err as { name?: string })?.name,
+      errMsg: (err as Error | undefined)?.message,
+      activeStreamId,
+      activeStreamSessionId,
+      sessionId,
+      resumeAttempted,
+      renderedChars: target.content?.length ?? 0,
+    })
     if ((err as { name?: string })?.name === 'AbortError') {
       // User aborted — preserve whatever content we already have
       target.streaming = false
@@ -263,6 +284,26 @@ async function handleAsk(text: string) {
         target.content = '_(已中断)_'
       } else {
         target.content += '\n\n_(已中断)_'
+      }
+    } else if (activeStreamId && activeStreamSessionId === sessionId && !resumeAttempted) {
+      // 传输层断连（非用户中断）：恢复为可续传状态，从 offset=0 重放该流已写入的事件。
+      resumeAttempted = true
+      target.content = ''
+      target.streaming = true
+      target.failed = false
+      target.failureMessage = null
+      target.citations = []
+      try {
+        await resumeAssistantStream(activeStreamSessionId, activeStreamId, authStore.accessToken!, {
+          signal: streamAbort?.signal,
+          onEvent: (ev) => onStreamEvent(ev, target),
+        })
+      } catch (resumeErr) {
+        if ((resumeErr as { name?: string })?.name !== 'AbortError') {
+          target.streaming = false
+          target.failed = true
+          target.failureMessage = extractApiError(resumeErr, '续传失败')
+        }
       }
     } else {
       target.streaming = false
@@ -272,6 +313,9 @@ async function handleAsk(text: string) {
   } finally {
     streaming.value = false
     streamAbort = null
+    activeStreamId = null
+    activeStreamSessionId = null
+    resumeAttempted = false
     // Bump the session in the local list (move to top, update lastMessageAt)
     bumpSession(sessionId)
     // Silently reload sessions so auto-rename takes effect
@@ -280,6 +324,13 @@ async function handleAsk(text: string) {
 }
 
 function onStreamEvent(ev: AssistantChatStreamEvent, target: UiAssistantMessage) {
+  // 记录流级唯一标识，用于断线后 resume / 主动 stop。
+  if (ev.streamId) {
+    activeStreamId = ev.streamId
+  }
+  if (ev.sessionId != null) {
+    activeStreamSessionId = ev.sessionId
+  }
   switch (ev.event) {
     case 'start':
       target.streaming = true
@@ -307,9 +358,17 @@ function onStreamEvent(ev: AssistantChatStreamEvent, target: UiAssistantMessage)
   }
 }
 
-function abortStream() {
+async function abortStream() {
+  // 先断开本地 SSE 连接，再通知后端写入 stop 终止事件（让所有副本的轮询器停止）。
   if (streamAbort) {
     streamAbort.abort()
+  }
+  if (activeStreamId && activeStreamSessionId != null && authStore.accessToken) {
+    try {
+      await stopAssistantStream(activeStreamSessionId, activeStreamId, authStore.accessToken)
+    } catch (err) {
+      console.error('Stop assistant stream failed:', extractApiError(err, ''))
+    }
   }
 }
 

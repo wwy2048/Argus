@@ -7,6 +7,8 @@ import {
   deleteQaRecord,
   getQaRecord,
   listQaRecords,
+  resumeQaStream,
+  stopQaStream,
   streamAskQuestion,
   type CitationItem,
   type EvidenceOverview,
@@ -78,6 +80,11 @@ const asking = ref(false)
 const historyLoading = ref(false)
 const historyError = ref('')
 let historyRequestSeq = 0
+
+// 断点续传 / 主动停止所需的流级状态
+let qaStreamAbort: AbortController | null = null
+let activeStreamId: string | null = null
+let qaResumeAttempted = false
 
 function recordSessionId(recordId: number): string {
   return `qa-record-${recordId}`
@@ -251,11 +258,15 @@ async function handleAsk(text: string) {
   })
 
   asking.value = true
+  let streamedContent = ''
   let citationsReceived = false
   let recordId: number | null = null
-  try {
-    let streamedContent = ''
+  // 重置断点续传状态：每次新提问都从 live 流开始。
+  activeStreamId = null
+  qaResumeAttempted = false
+  qaStreamAbort = new AbortController()
 
+  try {
     await streamAskQuestion(
       {
         groupId: selectedGroupId.value,
@@ -263,6 +274,10 @@ async function handleAsk(text: string) {
       },
       authStore.accessToken!,
       {
+        signal: qaStreamAbort.signal,
+        onStream(streamId: string) {
+          activeStreamId = streamId
+        },
         onToken(token: string) {
           streamedContent += token
           updateMessage(sessionId, assistantId, {
@@ -320,17 +335,143 @@ async function handleAsk(text: string) {
       })
     }
   } catch (err) {
-    updateMessage(sessionId, assistantId, {
-      content: '',
-      pending: false,
-      answered: false,
-      reasonCode: 'REQUEST_FAILED',
-      reasonMessage: extractApiError(err, '请求失败，请稍后再试'),
-      citations: [],
-      evidenceOverview: null,
+    console.log('[断连诊断] qa', {
+      errName: (err as { name?: string })?.name,
+      errMsg: (err as Error | undefined)?.message,
+      activeStreamId,
+      qaResumeAttempted,
+      renderedChars: streamedContent?.length ?? 0,
     })
+    if ((err as { name?: string })?.name === 'AbortError') {
+      // 用户主动停止：保留已生成的内容
+      updateMessage(sessionId, assistantId, {
+        content: streamedContent,
+        pending: false,
+        answered: streamedContent.length > 0,
+        reasonCode: 'STOPPED',
+        reasonMessage: null,
+        citations: [],
+        evidenceOverview: null,
+        recordId,
+      })
+    } else if (activeStreamId && !qaResumeAttempted) {
+      // 传输层断连（非用户中断）：从 offset=0 重放该流已写入的事件。
+      qaResumeAttempted = true
+      streamedContent = ''
+      citationsReceived = false
+      recordId = null
+      updateMessage(sessionId, assistantId, {
+        content: '',
+        pending: true,
+        answered: false,
+        reasonCode: null,
+        reasonMessage: null,
+        citations: [],
+        evidenceOverview: null,
+        recordId: null,
+      })
+      try {
+        await resumeQaStream(activeStreamId, authStore.accessToken!, {
+          signal: qaStreamAbort?.signal,
+          onStream(streamId: string) {
+            activeStreamId = streamId
+          },
+          onToken(token: string) {
+            streamedContent += token
+            updateMessage(sessionId, assistantId, {
+              content: streamedContent,
+              pending: true,
+            })
+          },
+          onCitations(citations: CitationItem[]) {
+            citationsReceived = true
+            updateMessage(sessionId, assistantId, {
+              content: streamedContent,
+              pending: false,
+              answered: citations.length > 0 || streamedContent.length > 0,
+              reasonCode: null,
+              reasonMessage: null,
+              citations,
+            })
+          },
+          onEvidenceOverview(overview: EvidenceOverview | null) {
+            updateMessage(sessionId, assistantId, {
+              evidenceOverview: overview,
+            })
+          },
+          onError(message: string) {
+            updateMessage(sessionId, assistantId, {
+              content: streamedContent,
+              pending: false,
+              answered: false,
+              reasonCode: 'STREAM_ERROR',
+              reasonMessage: message,
+              citations: [],
+              evidenceOverview: null,
+            })
+          },
+          onRecord(id: number) {
+            recordId = id
+            updateMessage(sessionId, assistantId, {
+              recordId: id,
+            })
+          },
+        })
+        if (!citationsReceived) {
+          updateMessage(sessionId, assistantId, {
+            content: streamedContent,
+            pending: false,
+            answered: streamedContent.length > 0,
+            reasonCode: null,
+            reasonMessage: null,
+            citations: [],
+            evidenceOverview: null,
+            recordId,
+          })
+        }
+      } catch (resumeErr) {
+        if ((resumeErr as { name?: string })?.name !== 'AbortError') {
+          updateMessage(sessionId, assistantId, {
+            content: streamedContent,
+            pending: false,
+            answered: false,
+            reasonCode: 'STREAM_ERROR',
+            reasonMessage: extractApiError(resumeErr, '续传失败'),
+            citations: [],
+            evidenceOverview: null,
+          })
+        }
+      }
+    } else {
+      updateMessage(sessionId, assistantId, {
+        content: '',
+        pending: false,
+        answered: false,
+        reasonCode: 'REQUEST_FAILED',
+        reasonMessage: extractApiError(err, '请求失败，请稍后再试'),
+        citations: [],
+        evidenceOverview: null,
+      })
+    }
   } finally {
     asking.value = false
+    qaStreamAbort = null
+    activeStreamId = null
+    qaResumeAttempted = false
+  }
+}
+
+async function handleStopAsk() {
+  // 先断开本地 SSE 连接，再通知后端写入 stop 终止事件（让所有副本的轮询器停止）。
+  if (qaStreamAbort) {
+    qaStreamAbort.abort()
+  }
+  if (activeStreamId && authStore.accessToken) {
+    try {
+      await stopQaStream(activeStreamId, authStore.accessToken)
+    } catch (err) {
+      historyError.value = extractApiError(err, '停止问答失败')
+    }
   }
 }
 
@@ -446,6 +587,7 @@ onMounted(() => {
         :loading="asking"
         :group-name="selectedGroupName"
         @submit="handleAsk"
+        @stop="handleStopAsk"
       />
     </main>
 

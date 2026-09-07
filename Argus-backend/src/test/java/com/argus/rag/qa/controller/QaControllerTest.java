@@ -1,8 +1,16 @@
 package com.argus.rag.qa.controller;
 
+import com.argus.rag.auth.security.JwtAccessTokenService;
+import com.argus.rag.common.enums.SystemRole;
 import com.argus.rag.common.exception.BusinessException;
 import com.argus.rag.common.exception.ForbiddenException;
-import com.argus.rag.auth.security.JwtAccessTokenService;
+import com.argus.rag.common.security.AuthenticatedUser;
+import com.argus.rag.common.security.UserContext;
+import com.argus.rag.common.stream.StreamEvent;
+import com.argus.rag.common.stream.StreamEventStore;
+import com.argus.rag.common.stream.StreamGenerationRegistry;
+import com.argus.rag.common.stream.StreamPoller;
+import com.argus.rag.common.stream.StreamStopService;
 import com.argus.rag.qa.model.EvidenceLevel;
 import com.argus.rag.qa.model.dto.AskQuestionRequest;
 import com.argus.rag.qa.model.vo.AskQuestionResponse;
@@ -10,6 +18,7 @@ import com.argus.rag.qa.service.QaChatService;
 import com.argus.rag.qa.service.QaService;
 import com.argus.rag.qa.support.CitationAssembler;
 import com.argus.rag.qa.support.EvidenceOverviewAssembler;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -19,16 +28,20 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.SpringBootConfiguration;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
-import org.springframework.http.MediaType;
+import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
+import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import reactor.core.publisher.Flux;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -43,7 +56,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * {@link QaController} 单元测试。
  * <p>
  * 使用 {@link WebMvcTest} 仅加载 Controller 层，模拟 Service 层依赖，
- * 重点测试 SSE 流式接口的各类场景。
+ * 并以内存版 {@link StreamEventStore} + 真实 {@link StreamPoller}/{@link StreamGenerationRegistry}
+ * 复现"写 Redis 事件日志 + 轮询推送"的断点续传链路。
  * </p>
  */
 @WebMvcTest(controllers = QaController.class)
@@ -54,6 +68,21 @@ class QaControllerTest {
     @SpringBootConfiguration
     @EnableAutoConfiguration
     static class TestApplication {
+
+        @Bean
+        StreamEventStore streamEventStore() {
+            return new InMemoryStreamEventStore();
+        }
+
+        @Bean
+        StreamPoller streamPoller(StreamEventStore store) {
+            return new StreamPoller(store);
+        }
+
+        @Bean
+        StreamGenerationRegistry streamGenerationRegistry() {
+            return new StreamGenerationRegistry();
+        }
     }
 
     @Autowired
@@ -70,6 +99,9 @@ class QaControllerTest {
 
     @MockitoBean
     private JwtAccessTokenService jwtAccessTokenService;
+
+    @MockitoBean
+    private StreamStopService streamStopService;
 
     private static final String STREAM_URL = "/api/qa/stream-ask";
 
@@ -118,6 +150,20 @@ class QaControllerTest {
                 new AtomicReference<>(recordId));
     }
 
+    @BeforeEach
+    void setUp() {
+        // 默认 CitationAssembler 返回空列表
+        when(citationAssembler.assembleDocuments(any())).thenReturn(List.of());
+        when(evidenceOverviewAssembler.assemble(any())).thenReturn(null);
+        // 模拟已登录业务用户，供控制器捕获并传播到虚拟线程。
+        UserContext.set(new AuthenticatedUser(1L, "user", "测试用户", SystemRole.USER, false));
+    }
+
+    @AfterEach
+    void tearDown() {
+        UserContext.clear();
+    }
+
     @Test
     @DisplayName("完成流式回答后应发送 record 事件")
     void shouldSendRecordEventOnCompleteWhenRecordIdAvailable() throws Exception {
@@ -139,13 +185,6 @@ class QaControllerTest {
         assertThat(responseBody)
                 .contains("event:record")
                 .contains("\"recordId\":99");
-    }
-
-    @BeforeEach
-    void setUp() {
-        // 默认 CitationAssembler 返回空列表
-        when(citationAssembler.assembleDocuments(any())).thenReturn(List.of());
-        when(evidenceOverviewAssembler.assemble(any())).thenReturn(null);
     }
 
     // ──────────────────────────────────────────────
@@ -182,7 +221,7 @@ class QaControllerTest {
                                     0,
                                     0.95,
                                     "BOTH",
-                                    "璇佹嵁鍐呭")))),
+                                    "证据内容")))),
                     List.of());
 
             when(citationAssembler.assembleDocuments(documents)).thenReturn(citations);
@@ -458,6 +497,55 @@ class QaControllerTest {
             assertThat(responseBody)
                     .doesNotContain("event:token")
                     .doesNotContain("event:error");
+        }
+    }
+
+    /** 内存版流式事件存储，用于单元测试复现 Redis List 语义。 */
+    static class InMemoryStreamEventStore implements StreamEventStore {
+
+        private final Map<String, CopyOnWriteArrayList<StreamEvent>> events = new ConcurrentHashMap<>();
+
+        @Override
+        public String streamKey(String biz, Long sessionId, String streamId) {
+            return biz + ":" + sessionId + ":" + streamId;
+        }
+
+        @Override
+        public String streamKey(String biz, String streamId) {
+            return biz + ":" + streamId;
+        }
+
+        @Override
+        public void append(String key, StreamEvent event) {
+            events.computeIfAbsent(key, k -> new CopyOnWriteArrayList<>()).add(event);
+        }
+
+        @Override
+        public List<StreamEvent> read(String key, long fromOffset) {
+            CopyOnWriteArrayList<StreamEvent> list = events.get(key);
+            if (list == null) {
+                return List.of();
+            }
+            List<StreamEvent> snapshot = new ArrayList<>(list);
+            if (fromOffset >= snapshot.size()) {
+                return List.of();
+            }
+            return new ArrayList<>(snapshot.subList((int) fromOffset, snapshot.size()));
+        }
+
+        @Override
+        public long nextOffset(long fromOffset, int eventCount) {
+            return fromOffset + eventCount;
+        }
+
+        @Override
+        public boolean exists(String key) {
+            return events.containsKey(key);
+        }
+
+        @Override
+        public void delete(String key) {
+            events.remove(key);
         }
     }
 }

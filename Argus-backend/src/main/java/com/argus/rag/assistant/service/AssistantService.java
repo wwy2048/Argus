@@ -129,17 +129,18 @@ public class AssistantService {
      * 流式聊天入口（简化版本）。
      * <p>使用默认的 Agent 流式执行逻辑，将模型输出的 delta 逐段通过 eventEmitter 推送给前端。</p>
      *
+     * @param streamId      本次流式请求的请求级唯一标识（UUID），用于断点续传
      * @param request        HTTP 请求对象，用于身份认证和权限校验
      * @param chatRequest    聊天请求体
      * @param eventEmitter   流式事件发射器，用于推送 SSE 事件
      */
-    @Transactional
     public void streamChat(
+            String streamId,
             HttpServletRequest request,
             AssistantChatRequest chatRequest,
             AssistantStreamEventEmitter eventEmitter
     ) {
-        streamChat( chatRequest, eventEmitter, deltaEmitter ->
+        streamChat(streamId, chatRequest, eventEmitter, deltaEmitter ->
                 assistantAgentFacade.streamChat(
                         currentUserService.requireBusinessUser().userId(),
                         chatRequest.sessionId(),
@@ -155,12 +156,13 @@ public class AssistantService {
      * <p>按顺序执行：参数校验 → 保存用户消息 → 发送 start 事件 → 执行 Agent 流式调用 →
      * 流式过程中逐段发送 delta 事件 → 保存助手回复 → 发送 done 事件。</p>
      *
+     * @param streamId       本次流式请求的请求级唯一标识（UUID），用于断点续传
      * @param chatRequest    聊天请求体
      * @param eventEmitter   流式事件发射器
      * @param streamExecutor 流式执行器，定义具体的 Agent 流式调用逻辑
      */
-    @Transactional
     public void streamChat(
+            String streamId,
             AssistantChatRequest chatRequest,
             AssistantStreamEventEmitter eventEmitter,
             ChatStreamExecutor streamExecutor
@@ -179,6 +181,7 @@ public class AssistantService {
 
             // 告诉前端：流式回答开始了
             eventEmitter.emit(AssistantChatStreamEvent.start(
+                    streamId,
                     safeRequest.sessionId(),
                     safeRequest.toolMode(),
                     safeRequest.groupId()
@@ -189,6 +192,7 @@ public class AssistantService {
                     safeRequest,
                     // 每当模型吐出一小段文本 delta, 包装为AssistantChatStreamEvent.delta()，再通过 eventEmitter.emit(...) 发给前端
                     delta -> eventEmitter.emit(AssistantChatStreamEvent.delta(
+                            streamId,
                             safeRequest.sessionId(),
                             safeRequest.toolMode(),
                             safeRequest.groupId(),
@@ -206,6 +210,7 @@ public class AssistantService {
 
             // 发送done事件，表示流式回答结束
             eventEmitter.emit(AssistantChatStreamEvent.done(
+                    streamId,
                     safeRequest.sessionId(),
                     safeRequest.toolMode(),
                     safeRequest.groupId(),

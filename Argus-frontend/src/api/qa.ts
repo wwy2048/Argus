@@ -100,6 +100,8 @@ export interface QaStreamHandlers {
   /** 发生错误时回调 */
   onError: (message: string) => void
   onRecord?: (recordId: number) => void
+  /** 后端创建流后回传的 streamId，用于断点续传/停止 */
+  onStream?: (streamId: string) => void
   /** 可用于中断流式连接的 AbortSignal */
   signal?: AbortSignal
 }
@@ -258,7 +260,64 @@ export async function streamAskQuestion(
     throw new Error(message || '流式问答请求失败')
   }
 
-  const reader = response.body.getReader()
+  await readQaSse(response, handlers)
+}
+
+/**
+ * 断点续传（SSE）——知识问答。
+ *
+ * GET /api/qa/stream-ask/resume?streamId={}
+ *
+ * 从 offset=0 重放该流的全部事件；若流已写入终止事件则立即结束，否则继续轮询直至终止。
+ */
+export async function resumeQaStream(
+  streamId: string,
+  accessToken: string,
+  handlers: QaStreamHandlers,
+): Promise<void> {
+  const baseUrl = (import.meta.env.VITE_API_BASE_URL ?? '/api').replace(/\/$/, '')
+  const params = new URLSearchParams({ streamId })
+  const response = await fetch(`${baseUrl}/qa/stream-ask/resume?${params}`, {
+    method: 'GET',
+    headers: {
+      Accept: 'text/event-stream',
+      Authorization: `Bearer ${accessToken}`,
+    },
+    signal: handlers.signal,
+  })
+
+  if (!response.ok || response.body == null) {
+    const message = await response.text().catch(() => '续传问答流失败')
+    throw new Error(message || '续传问答流失败')
+  }
+
+  await readQaSse(response, handlers)
+}
+
+/**
+ * 主动停止知识问答流。
+ *
+ * POST /api/qa/stream-ask/stop  body {streamId}
+ */
+export async function stopQaStream(streamId: string, accessToken: string): Promise<void> {
+  const baseUrl = (import.meta.env.VITE_API_BASE_URL ?? '/api').replace(/\/$/, '')
+  const response = await fetch(`${baseUrl}/qa/stream-ask/stop`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({ streamId }),
+  })
+  if (!response.ok) {
+    const message = await response.text().catch(() => '停止问答流失败')
+    throw new Error(message || '停止问答流失败')
+  }
+}
+
+/** 读取 SSE 响应体并逐条回调 handlers。 */
+async function readQaSse(response: Response, handlers: QaStreamHandlers): Promise<void> {
+  const reader = response.body!.getReader()
   const decoder = new TextDecoder('utf-8')
   let buffer = ''
 
@@ -365,6 +424,17 @@ function dispatchQaSseEvent(rawEvent: string, handlers: QaStreamHandlers): void 
         }
       } catch {
         // Ignore malformed record events; answer delivery is already complete.
+      }
+      break
+    }
+    case 'stream': {
+      try {
+        const parsed = JSON.parse(rawData) as { streamId?: string }
+        if (typeof parsed.streamId === 'string' && parsed.streamId) {
+          handlers.onStream?.(parsed.streamId)
+        }
+      } catch {
+        // Ignore malformed stream metadata events.
       }
       break
     }

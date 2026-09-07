@@ -220,7 +220,7 @@ public class AssistantConversationService {
         return entity;
     }
 
-    private AssistantSessionEntity requireOwnedSession(Long currentUserId, Long sessionId) {
+    public AssistantSessionEntity requireOwnedSession(Long currentUserId, Long sessionId) {
         AssistantSessionEntity session = assistantSessionMapper.selectByIdAndUserId(sessionId, currentUserId);
         if (session == null) {
             throw new BusinessException("会话不存在");

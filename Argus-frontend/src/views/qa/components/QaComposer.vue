@@ -10,6 +10,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   submit: [text: string]
+  stop: []
 }>()
 
 const text = ref('')
@@ -94,22 +95,26 @@ defineExpose({ focus, setText })
             <span class="qa-composer__kbd-label">换行</span>
           </div>
           <button
+            v-if="loading"
+            class="qa-composer__send qa-composer__send--stop"
+            type="button"
+            @click="emit('stop')"
+          >
+            <span class="qa-composer__btn-square" />
+            <span>停止</span>
+          </button>
+          <button
+            v-else
             class="qa-composer__send"
             type="button"
             :disabled="!text.trim() || disabled || loading"
             @click="submit"
           >
-            <template v-if="loading">
-              <span class="qa-composer__spinner" />
-              <span>生成中</span>
-            </template>
-            <template v-else>
-              <span>发送</span>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-                <line x1="5" y1="12" x2="19" y2="12" />
-                <polyline points="12 5 19 12 12 19" />
-              </svg>
-            </template>
+            <span>发送</span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="5" y1="12" x2="19" y2="12" />
+              <polyline points="12 5 19 12 12 19" />
+            </svg>
           </button>
         </div>
       </div>
@@ -297,5 +302,25 @@ defineExpose({ focus, setText })
 
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+.qa-composer__send--stop {
+  background: #fff;
+  color: #dc2626;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  box-shadow: none;
+}
+
+.qa-composer__send--stop:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.06);
+  border-color: #ef4444;
+}
+
+.qa-composer__btn-square {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  background: #ef4444;
+  border-radius: 2px;
 }
 </style>

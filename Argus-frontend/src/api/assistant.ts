@@ -180,27 +180,121 @@ export async function streamAssistantMessage(
     const message = await response.text()
     throw new Error(message || '发送流式消息失败')
   }
+  await readAssistantSse(response, handlers.onEvent)
+}
 
-  const reader = response.body.getReader()
+/**
+ * 断点续传（SSE）——助手流。
+ *
+ * GET /api/assistant/chat/stream/resume?sessionId={}&streamId={}
+ *
+ * 从 offset=0 重放该流的全部事件；若流已写入终止事件则立即结束，否则继续轮询直至终止。
+ */
+export async function resumeAssistantStream(
+  sessionId: number,
+  streamId: string,
+  accessToken: string,
+  handlers: {
+    onEvent: (event: AssistantChatStreamEvent) => void
+    signal?: AbortSignal
+  },
+): Promise<void> {
+  const baseUrl = (import.meta.env.VITE_API_BASE_URL ?? '/api').replace(/\/$/, '')
+  const params = new URLSearchParams({ sessionId: String(sessionId), streamId })
+  const response = await fetch(`${baseUrl}/assistant/chat/stream/resume?${params}`, {
+    method: 'GET',
+    headers: {
+      Accept: 'text/event-stream',
+      Authorization: `Bearer ${accessToken}`,
+    },
+    signal: handlers.signal,
+  })
+
+  if (!response.ok || response.body == null) {
+    const message = await response.text()
+    throw new Error(message || '续传助手流失败')
+  }
+  await readAssistantSse(response, handlers.onEvent)
+}
+
+/**
+ * 主动停止助手流。
+ *
+ * POST /api/assistant/chat/stream/stop  body {sessionId, streamId}
+ */
+export async function stopAssistantStream(
+  sessionId: number,
+  streamId: string,
+  accessToken: string,
+): Promise<void> {
+  const baseUrl = (import.meta.env.VITE_API_BASE_URL ?? '/api').replace(/\/$/, '')
+  const response = await fetch(`${baseUrl}/assistant/chat/stream/stop`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({ sessionId, streamId }),
+  })
+  if (!response.ok) {
+    const message = await response.text()
+    throw new Error(message || '停止助手流失败')
+  }
+}
+
+/** 读取 SSE 响应体并逐条回调 onEvent。 */
+async function readAssistantSse(
+  response: Response,
+  onEvent: (event: AssistantChatStreamEvent) => void,
+): Promise<void> {
+  const reader = response.body!.getReader()
   const decoder = new TextDecoder('utf-8')
   let buffer = ''
-
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) {
-      break
+  let eventCount = 0
+  let sawTerminal = false // 是否收到过后端主动终止事件（done/error）
+  const startedAt = Date.now()
+  const handle = (event: AssistantChatStreamEvent) => {
+    eventCount += 1
+    if (event.event === 'done' || event.event === 'error') {
+      sawTerminal = true
     }
-    buffer += decoder.decode(value, { stream: true })
-    let separatorIndex = buffer.indexOf('\n\n')
-    while (separatorIndex >= 0) {
-      const rawEvent = buffer.slice(0, separatorIndex)
-      buffer = buffer.slice(separatorIndex + 2)
-      const parsed = parseSseEvent(rawEvent)
-      if (parsed !== null) {
-        handlers.onEvent(parsed)
+    onEvent(event)
+  }
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) {
+        // 读流正常走到 EOF：若从未收到终态事件，说明连接被干净关闭（浏览器层），
+        // 而非后端完成任务 —— 这是自动 resume 当前识别不到的一类断连。
+        console.log('[SSE-read] 连接干净结束(EOF)', {
+          eventCount,
+          sawTerminal,
+          elapsedMs: Date.now() - startedAt,
+        })
+        break
       }
-      separatorIndex = buffer.indexOf('\n\n')
+      buffer += decoder.decode(value, { stream: true })
+      let separatorIndex = buffer.indexOf('\n\n')
+      while (separatorIndex >= 0) {
+        const rawEvent = buffer.slice(0, separatorIndex)
+        buffer = buffer.slice(separatorIndex + 2)
+        const parsed = parseSseEvent(rawEvent)
+        if (parsed !== null) {
+          handle(parsed)
+        }
+        separatorIndex = buffer.indexOf('\n\n')
+      }
     }
+  } catch (err) {
+    // reader.read() 抛异常：这是原有自动 resume 唯一识别的断连路径。
+    console.log('[SSE-read] 读取异常', {
+      errName: (err as { name?: string })?.name,
+      errMsg: (err as Error | undefined)?.message,
+      eventCount,
+      sawTerminal,
+      elapsedMs: Date.now() - startedAt,
+    })
+    throw err
   }
 }
 

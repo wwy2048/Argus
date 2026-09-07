@@ -235,6 +235,8 @@ export interface AssistantChatResult {
 export interface AssistantChatStreamEvent {
   /** 事件类型：start / delta / done / error */
   event: 'start' | 'delta' | 'done' | 'error'
+  /** 本次流式请求的请求级唯一标识（UUID），用于断点续传 */
+  streamId: string | null
   /** 会话 ID */
   sessionId: number
   /** 本轮回合使用的工具模式 */

@@ -12,6 +12,11 @@ public record AssistantChatStreamEvent(
          */
         String event,
         /**
+         * 本次流式请求的请求级唯一标识（UUID）
+         * <p>用于断点续传：客户端记录后，通过 resume 接口重放 from 0 重建内容。</p>
+         */
+        String streamId,
+        /**
          * 会话ID
          */
         Long sessionId,
@@ -46,12 +51,14 @@ public record AssistantChatStreamEvent(
 ) {
 
     public static AssistantChatStreamEvent start(
+            String streamId,
             Long sessionId,
             AssistantToolMode toolMode,
             Long groupId
     ) {
         return new AssistantChatStreamEvent(
                 "start",
+                streamId,
                 sessionId,
                 toolMode,
                 groupId,
@@ -64,6 +71,7 @@ public record AssistantChatStreamEvent(
     }
 
     public static AssistantChatStreamEvent delta(
+            String streamId,
             Long sessionId,
             AssistantToolMode toolMode,
             Long groupId,
@@ -71,6 +79,7 @@ public record AssistantChatStreamEvent(
     ) {
         return new AssistantChatStreamEvent(
                 "delta",
+                streamId,
                 sessionId,
                 toolMode,
                 groupId,
@@ -83,6 +92,7 @@ public record AssistantChatStreamEvent(
     }
 
     public static AssistantChatStreamEvent done(
+            String streamId,
             Long sessionId,
             AssistantToolMode toolMode,
             Long groupId,
@@ -92,6 +102,7 @@ public record AssistantChatStreamEvent(
     ) {
         return new AssistantChatStreamEvent(
                 "done",
+                streamId,
                 sessionId,
                 toolMode,
                 groupId,
@@ -104,6 +115,7 @@ public record AssistantChatStreamEvent(
     }
 
     public static AssistantChatStreamEvent error(
+            String streamId,
             Long sessionId,
             AssistantToolMode toolMode,
             Long groupId,
@@ -111,6 +123,7 @@ public record AssistantChatStreamEvent(
     ) {
         return new AssistantChatStreamEvent(
                 "error",
+                streamId,
                 sessionId,
                 toolMode,
                 groupId,

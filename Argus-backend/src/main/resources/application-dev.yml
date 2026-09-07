@@ -8,6 +8,12 @@ server:
 spring:
   application:
     name: argus-service
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      timeout: 5s
   datasource:
     url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:argus_rag}
     username: ${DB_USERNAME:your-db-username}
@@ -71,6 +77,10 @@ storage:
     bucket: ${MINIO_BUCKET:argus-rag-documents}
 
 argus:
+  stream:
+    prefix: ${ARGUS_STREAM_PREFIX:argus:stream:events}
+    ttl: ${ARGUS_STREAM_TTL:1h}
+    stop-channel: ${ARGUS_STREAM_STOP_CHANNEL:argus:stream:stop}
   rag:
     auth:
       jwt-secret: ${ARGUS_RAG_JWT_SECRET:change-me-to-a-32byte-secret-key}
@@ -108,3 +118,4 @@ youcom:
     enabled: false
     api-key: ${YOUCOM_API_KEY:}
     top-k: 10
+
