@@ -60,6 +60,11 @@ public class GlobalExceptionHandler {
         return new ApiResponse<>(false, null, "上传文件超过大小限制");
     }
 
+    @ExceptionHandler(RateLimitException.class)
+    @ResponseStatus(HttpStatus.TOO_MANY_REQUESTS)
+    public ApiResponse<Void> handleRateLimitException(RateLimitException exception) {
+        return new ApiResponse<>(false, null, exception.getMessage());
+    }
     /** 兜底处理，避免堆栈信息泄露到前端 */
     @ExceptionHandler(Exception.class)
     @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
@@ -68,3 +73,4 @@ public class GlobalExceptionHandler {
         return new ApiResponse<>(false, null, "服务器内部错误");
     }
 }
+

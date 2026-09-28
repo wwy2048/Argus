@@ -377,13 +377,19 @@ public class QaChatService {
                                                         && usage.getTotalTokens() > 0) {
                                                 usageRef.set(extractUsageInfo(usage, false));
                                         }
-                                        String text = null;
-                                        if (response.getResult() != null && response.getResult().getOutput() != null) {
-                                                text = response.getResult().getOutput().getText();
+                                        // 并非每个流式分片都携带正文：推理模型（如 deepseek-flash）会先推送
+                                        // 只含 reasoning_content、content 为 null 的分片，usage 分片也可能不含
+                                        // choices，此时 getResult()/getText() 为 null。
+                                        // Reactor 不允许 map 返回 null，这里统一用空字符串表示“无文本增量”，
+                                        // 交由下游 filter 过滤。
+                                        if (response.getResult() == null || response.getResult().getOutput() == null) {
+                                                return "";
                                         }
-                                        if (text != null) {
-                                                charCount.addAndGet(text.length());
+                                        String text = response.getResult().getOutput().getText();
+                                        if (text == null) {
+                                                return "";
                                         }
+                                        charCount.addAndGet(text.length());
                                         return text;
                                 })
                                 .filter(StringUtils::hasText)
